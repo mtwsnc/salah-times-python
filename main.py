@@ -1,65 +1,64 @@
-from flask import Flask, jsonify
-from flask_caching import Cache
-import requests
-from datetime import datetime, timedelta
-import pytz
-import threading
-import time
 import os
+import json
+import requests
+from datetime import datetime
+from flask import Flask, jsonify
+import pytz
+from threading import Timer
 
+# Initialize Flask app
 app = Flask(__name__)
 
-# Flask-Caching configuration
-cache_config = {
-    "CACHE_TYPE": "SimpleCache",  # Use a simple in-memory cache
-    "CACHE_DEFAULT_TIMEOUT": 43200  # Cache timeout of 12 hours
-}
-app.config.from_mapping(cache_config)
-cache = Cache(app)
+# Cache file path
+CACHE_FILE = 'prayer_times_cache.json'
 
-# Remote URL for prayer times
-PRAYER_TIMES_URL = "https://northerly-robin-8705.dataplicity.io/mtws-iqaamah-times/all"
-
-# Timezone
-TIMEZONE = pytz.timezone("US/Eastern")
-
-
+# Fetch prayer times from the remote URL
 def fetch_prayer_times():
-    """Fetch prayer times from the remote URL and cache them."""
-    try:
-        response = requests.get(PRAYER_TIMES_URL)
-        response.raise_for_status()  # Raise an error for bad HTTP responses
-        data = response.json()
-        cache.set("prayer_times", data)  # Cache the fetched data
-        return data
-    except requests.RequestException as e:
-        cached_data = cache.get("prayer_times")  # Use cached data if available
-        if cached_data:
-            return cached_data
-        return {"error": "Failed to fetch prayer times", "details": str(e)}
+    url = "https://northerly-robin-8705.dataplicity.io/mtws-iqaamah-times/all"
+    response = requests.get(url)
+    data = response.json()
 
+    # Save the data to cache file
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(data, f)
 
-def update_prayer_times():
-    """Background thread to periodically update cached prayer times."""
-    while True:
-        fetch_prayer_times()
-        time.sleep(43200)  # Wait for 12 hours before the next update
+# Read cached prayer times from file
+def read_cached_prayer_times():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
+# Set the timezone (US/Eastern)
+TIMEZONE = pytz.timezone('US/Eastern')
 
-@app.before_first_request
-def start_update_thread():
-    """Start the background thread for periodic updates."""
-    thread = threading.Thread(target=update_prayer_times, daemon=True)
-    thread.start()
+# Fetch and cache prayer times every 12 hours
+def update_cache_periodically():
+    fetch_prayer_times()
+    # Set the next update time (12 hours later)
+    Timer(12 * 60 * 60, update_cache_periodically).start()
 
+# Initial caching of prayer times and periodic update
+fetch_prayer_times()
+update_cache_periodically()
 
-def transform_prayer_times(data, day):
-    """Transform prayer times into a user-friendly format."""
-    if day not in data:
-        return {"error": f"No data available for {day}"}
+@app.route("/<day>", methods=["GET"])
+def get_prayer_times(day):
+    # Get current prayer times from cache
+    cached_times = read_cached_prayer_times()
 
-    times = data[day]
-    return {
+    # Ensure the day is a valid key
+    valid_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    if day not in valid_days:
+        return jsonify({"error": "Invalid day"}), 400
+
+    # Get the prayer times for the requested day
+    times = cached_times.get(day, {})
+    if not times:
+        return jsonify({"error": f"No data found for {day}"}), 404
+
+    # Return the prayer times in a user-friendly format
+    prayer_times = {
         "Fajr": times[0],
         "Dhuhr": times[1],
         "Asr": times[2],
@@ -67,32 +66,8 @@ def transform_prayer_times(data, day):
         "Ishaa": times[4]
     }
 
-
-@app.route("/prayer-times/<day>", methods=["GET"])
-def get_prayer_times_for_day(day):
-    """API endpoint to get prayer times for a specific day."""
-    data = fetch_prayer_times()
-    if "error" in data:
-        return jsonify(data), 500
-
-    day = day.capitalize()  # Ensure the day is properly capitalized
-    prayer_times = transform_prayer_times(data, day)
     return jsonify(prayer_times)
 
-
-@app.route("/prayer-times/today", methods=["GET"])
-def get_today_prayer_times():
-    """API endpoint to get prayer times for today."""
-    data = fetch_prayer_times()
-    if "error" in data:
-        return jsonify(data), 500
-
-    # Get the current day in the specified timezone
-    current_day = datetime.now(TIMEZONE).strftime("%A")
-    prayer_times = transform_prayer_times(data, current_day)
-    return jsonify(prayer_times)
-
-
+# Start the Flask app
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))  # Use PORT environment variable or default to 8000
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
